@@ -173,64 +173,51 @@
 /// ```
 #[macro_export]
 macro_rules! cfg_aliases {
-    // Helper that just checks whether the CFG environment variable is set
-    (@cfg_is_set $cfgname:ident) => {
-        {
-            let cfg_var = stringify!($cfgname).to_uppercase().replace("-", "_");
-            let result = std::env::var(format!("CARGO_CFG_{}", &cfg_var)).is_ok();
-
-            // CARGO_CFG_DEBUG_ASSERTIONS _should_ be set for when debug assertions are enabled,
-            // but as of writing is not: see https://github.com/rust-lang/cargo/issues/5777
-            if !result && cfg_var == "DEBUG_ASSERTIONS" {
-                std::env::var("PROFILE") == Ok("debug".to_owned())
-            } else {
-                result
-            }
-        }
-    };
-    // Helper to check for the presense of a feature
-    (@cfg_has_feature $feature:expr) => {
-        {
-            std::env::var(
-                format!(
-                    "CARGO_FEATURE_{}",
-                    &stringify!($feature).to_uppercase().replace("-", "_").replace('"', "")
-                )
-            ).map(|x| x == "1").unwrap_or(false)
-        }
-    };
-
-    // Helper that checks whether a CFG environment contains the given value
-    (@cfg_contains $cfgname:ident = $cfgvalue:expr) => {
-        std::env::var(
-            format!(
-                "CARGO_CFG_{}",
-                &stringify!($cfgname).to_uppercase().replace("-", "_")
-            )
-        ).unwrap_or("".to_owned()).split(",").find(|x| x == &$cfgvalue).is_some()
-    };
-
     // Emitting `any(clause1,clause2,...)`: convert to `$crate::cfg_aliases!(clause1) && $crate::cfg_aliases!(clause2) && ...`
     (
-        @parser_emit
+        @parser_emit,
         all
         $({$($grouped:tt)+})+
-    ) => {
-        ($(
-            ($crate::cfg_aliases!(@parser $($grouped)+))
-        )&&+)
-    };
+    ) => {{
+        let mut possible = $crate::True;
+        let mut cfgs = vec![];
+        let mut parsed = vec![];
+        $(
+            let $crate::Ret { cfg, parsed: pp, possible: p } = $crate::cfg_aliases!(@parser, $($grouped)+);
+            cfgs.extend(cfg);
+            parsed.push(pp);
+            possible &= p;
+        )*
+        let parsed = $crate::Cfg::All(parsed);
+        if cfgs.is_empty() {
+            $crate::Ret { cfg: None, parsed, possible }
+        } else {
+            $crate::Ret { cfg: Some($crate::Cfg::All(cfgs)), parsed, possible }
+        }
+    }};
 
     // Likewise for `all(clause1,clause2,...)`.
     (
-        @parser_emit
+        @parser_emit,
         any
         $({$($grouped:tt)+})+
-    ) => {
-        ($(
-            ($crate::cfg_aliases!(@parser $($grouped)+))
-        )||+)
-    };
+    ) => {{
+        let mut possible = $crate::False;
+        let mut cfgs = vec![];
+        let mut parsed = vec![];
+        $(
+            let $crate::Ret { cfg, parsed: pp, possible: p } = $crate::cfg_aliases!(@parser, $($grouped)+);
+            cfgs.extend(cfg);
+            parsed.push(pp);
+            possible |= p;
+        )*
+        let parsed = $crate::Cfg::Any(parsed);
+        if cfgs.is_empty() {
+            $crate::Ret { cfg: None, parsed, possible }
+        } else {
+            $crate::Ret { cfg: Some($crate::Cfg::Any(cfgs)), parsed, possible }
+        }
+    }};
 
     // "@clause" rules are used to parse the comma-separated lists. They munch
     // their inputs token-by-token and finally invoke an "@emit" rule when the
@@ -252,96 +239,105 @@ macro_rules! cfg_aliases {
     // delimeters so that the grouping can be easily extracted again in the
     // emission stage.
     (
-        @parser_clause
+        @parser_clause,
         $op:ident
         [$({$($grouped:tt)+})*]
         [, $($rest:tt)*]
         $($current:tt)+
     ) => {
-        $crate::cfg_aliases!(@parser_clause $op [
+        $crate::cfg_aliases!(@parser_clause, $op [
             $(
                 {$($grouped)+}
             )*
             {$($current)+}
         ] [
             $($rest)*
-        ]);
+        ])
     };
 
     // This rule comes next. It fires when the next un-parsed token is *not* a
     // comma. In this case, we add that token to the list of tokens in the
     // current clause, then move on to the next one.
     (
-        @parser_clause
+        @parser_clause,
         $op:ident
         [$({$($grouped:tt)+})*]
         [$tok:tt $($rest:tt)*]
         $($current:tt)*
     ) => {
-        $crate::cfg_aliases!(@parser_clause $op [
+        $crate::cfg_aliases!(@parser_clause, $op [
             $(
                 {$($grouped)+}
             )*
         ] [
             $($rest)*
-        ] $($current)* $tok);
+        ] $($current)* $tok)
     };
 
     // This rule fires when there are no more tokens to parse in this list. We
     // finish off the "current" token group, then delegate to the emission
     // rule.
     (
-        @parser_clause
+        @parser_clause,
         $op:ident
         [$({$($grouped:tt)+})*]
         []
         $($current:tt)+
     ) => {
-        $crate::cfg_aliases!(@parser_emit $op
+        $crate::cfg_aliases!(@parser_emit, $op
             $(
                 {$($grouped)+}
             )*
             {$($current)+}
-        );
+        )
     };
 
 
     // `all(clause1, clause2...)` : we must parse this comma-separated list and
     // partner with `@emit all` to output a bunch of && terms.
     (
-        @parser
+        @parser,
         all($($tokens:tt)+)
     ) => {
-        $crate::cfg_aliases!(@parser_clause all [] [$($tokens)+])
+        $crate::cfg_aliases!(@parser_clause, all [] [$($tokens)+]);
     };
 
     // Likewise for `any(clause1, clause2...)`
     (
-        @parser
+        @parser,
         any($($tokens:tt)+)
     ) => {
-        $crate::cfg_aliases!(@parser_clause any [] [$($tokens)+])
+        $crate::cfg_aliases!(@parser_clause, any [] [$($tokens)+])
     };
 
     // `not(clause)`: compute the inner clause, then just negate it.
     (
-        @parser
+        @parser,
         not($($tokens:tt)+)
-    ) => {
-        !($crate::cfg_aliases!(@parser $($tokens)+))
-    };
+    ) => {{
+        let $crate::Ret { cfg, parsed, possible } = $crate::cfg_aliases!(@parser, $($tokens)+);
+        $crate::Ret { cfg: cfg.map($crate::Cfg::not), parsed: $crate::Cfg::not(parsed), possible: !possible }
+    }};
 
     // `feature = value`: test for a feature.
-    (@parser feature = $value:expr) => {
-        $crate::cfg_aliases!(@cfg_has_feature $value)
-    };
+    (@parser, feature = $value:expr) => {{
+        let possible;
+        #[cfg(feature = $value)] { possible = $crate::True; }
+        #[cfg(not(feature = $value))] { possible = $crate::False; }
+        $crate::Ret {
+            cfg: None,
+            parsed: $crate::Cfg::Feature(stringify!($value)),
+            possible,
+        }
+    }};
     // `param = value`: test for equality.
-    (@parser $key:ident = $value:expr) => {
-        $crate::cfg_aliases!(@cfg_contains $key = $value)
-    };
+    (@parser, $key:ident = $value:expr) => {{
+            let cfg = $crate::Cfg::Contains(stringify!($key), stringify!($value));
+            $crate::Ret { cfg: Some(cfg.clone()), parsed: cfg, possible: $crate::Maybe }
+    }};
     // Parse a lone identifier that might be an alias
-    (@parser $e:ident) => {
-        __cfg_aliases_matcher__!($e)
+    (@parser, $e:ident) => {
+        __cfg_aliases_matcher__!($e);
     };
 
     // Entrypoint that defines the matcher
@@ -354,26 +350,189 @@ macro_rules! cfg_aliases {
         macro_rules! __cfg_aliases_matcher__ {
             // Parse config expression for the alias
             $(
-                ( $alias ) => {
-                    $crate::cfg_aliases!(@parser $($config)*)
-                };
+                ( $alias ) => {{
+                    let mut ret = $crate::cfg_aliases!(@parser, $($config)*);
+                    ret.parsed = $crate::Cfg::Set(stringify!($alias));
+                    ret
+                }};
             )*
             // Anything that doesn't match evaluate the item
-            ( $dol e:ident ) => {
-                $crate::cfg_aliases!(@cfg_is_set $dol e)
-            };
+            ( $dol e:ident ) => {{
+                let cfg = $crate::Cfg::Set(stringify!($dol e));
+                $crate::Ret { cfg: Some(cfg.clone()), parsed: cfg, possible: $crate::Maybe }
+            }};
         }
 
-        $(
-            println!("cargo:rustc-check-cfg=cfg({})", stringify!($alias));
-            if $crate::cfg_aliases!(@parser $($config)*) {
-                println!("cargo:rustc-cfg={}", stringify!($alias));
+        let mut unconditional_cfgs = vec![];
+        let mut platform_fixups: ::std::collections::BTreeMap<String, (i32, Vec<&'static str>)> = ::std::collections::BTreeMap::new();
+
+        let mut i = 0;
+        $({
+            fn $alias() -> $crate::Ret {
+                $crate::cfg_aliases!(@parser, $($config)*)
             }
-        )*
+            let ret = $alias();
+            match ret {
+                $crate::Ret { possible: $crate::False, .. } => {}
+                $crate::Ret { possible: $crate::True, parsed, .. } => {
+                    unconditional_cfgs.push((stringify!($alias), parsed));
+                }
+                $crate::Ret { possible: $crate::Maybe, cfg: Some(cfg), parsed: _ } => {
+                    let alias = stringify!($alias);
+                    let cfg = cfg.normalise();
+                    let key = format!("{cfg}");
+                    platform_fixups.entry(key).or_insert_with(|| {
+                        i += 1;
+                        (i, vec![])
+                    }).1.push(alias);
+                }
+                $crate::Ret { possible: $crate::Maybe, cfg: None, .. } => {}
+            }
+        })*
+
+        if !unconditional_cfgs.is_empty() {
+            let cfgs = unconditional_cfgs.iter().map(|c| c.0).collect::<Vec<_>>();
+            println!("cfgs = {:?}", cfgs);
+            println!();
+        }
+
+        let mut sortable = platform_fixups.into_iter().collect::<Vec<_>>();
+        sortable.sort_by_key(|(_, (ord, _))| *ord);
+
+        for (cfg_key, (order, alias)) in sortable {
+            println!(
+                "[platform_fixup.'cfg({})']\ncfgs = {:?}\n",
+                cfg_key,
+                alias
+            )
+        }
     };
 
     // Catch all that starts the macro
     ($($tokens:tt)*) => {
         $crate::cfg_aliases!(@with_dollar[$] $($tokens)*)
+    }
+}
+
+pub struct Ret {
+    pub cfg: Option<Cfg>,
+    pub parsed: Cfg,
+    pub possible: Tristate,
+}
+
+type Name = &'static str;
+#[derive(Clone)]
+pub enum Cfg {
+    Set(Name),
+    Feature(Name),
+    Contains(Name, Name),
+    Not(Box<Cfg>),
+    Any(Vec<Cfg>),
+    All(Vec<Cfg>),
+}
+impl Cfg {
+    pub fn not(cfg: Self) -> Self {
+        Cfg::Not(Box::new(cfg))
+    }
+    pub fn normalise(self) -> Self {
+        match self {
+            Self::All(cfgs) if cfgs.len() == 1 => cfgs.into_iter().nth(0).unwrap().normalise(),
+            Self::Any(cfgs) if cfgs.len() == 1 => cfgs.into_iter().nth(0).unwrap().normalise(),
+            Self::All(cfgs) => Self::All(cfgs.into_iter().map(Cfg::normalise).collect()),
+            Self::Any(cfgs) => Self::Any(cfgs.into_iter().map(Cfg::normalise).collect()),
+            Self::Not(cfg) => Self::Not(Box::new(cfg.normalise())),
+            _ => self,
+        }
+    }
+}
+impl fmt::Display for Cfg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Set(cfg) => f.write_str(cfg),
+            Self::Feature(feat) => write!(f, "feature = {feat:?}"),
+            Self::Contains(k, v) => write!(f, "{k} = {v}"),
+            Self::Not(cfg) => {
+                write!(f, "not({})", cfg)
+            }
+            Self::All(cfgs) => {
+                let mut any = false;
+                write!(f, "all(")?;
+                for x in cfgs {
+                    if any {
+                        f.write_str(", ")?;
+                    }
+                    x.fmt(f)?;
+                    any = true;
+                }
+                write!(f, ")")
+            }
+            Self::Any(cfgs) => {
+                let mut any = false;
+                write!(f, "any(")?;
+                for x in cfgs {
+                    if any {
+                        f.write_str(", ")?;
+                    }
+                    x.fmt(f)?;
+                    any = true;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tristate {
+    True,
+    False,
+    Maybe,
+}
+
+use std::fmt;
+
+pub use Tristate::*;
+
+impl std::ops::BitOr for Tristate {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (True, _) | (_, True) => True,
+            (Maybe, _) | (_, Maybe) => Maybe,
+            _ => False,
+        }
+    }
+}
+
+impl std::ops::BitAnd for Tristate {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (True, True) => True,
+            (_, False) | (False, _) => False,
+            (Maybe, _) | (_, Maybe) => Maybe,
+        }
+    }
+}
+
+impl std::ops::BitOrAssign for Tristate {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = *self | rhs;
+    }
+}
+
+impl std::ops::BitAndAssign for Tristate {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self = *self & rhs;
+    }
+}
+impl std::ops::Not for Tristate {
+    type Output = Self;
+    fn not(self) -> Self::Output {
+        match self {
+            Self::True => Self::False,
+            Self::False => Self::True,
+            Self::Maybe => Self::Maybe,
+        }
     }
 }
