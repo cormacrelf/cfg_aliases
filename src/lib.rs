@@ -322,11 +322,12 @@ macro_rules! cfg_aliases {
     // `feature = value`: test for a feature.
     (@parser, feature = $value:expr) => {{
         let possible;
-        #[cfg(feature = $value)] { possible = $crate::True; }
-        #[cfg(not(feature = $value))] { possible = $crate::False; }
+        #[cfg(feature = $value)] { possible = $crate::Maybe; }
+        #[cfg(not(feature = $value))] { possible = $crate::Maybe; }
+        let cfg = $crate::Cfg::Feature(stringify!($value));
         $crate::Ret {
-            cfg: None,
-            parsed: $crate::Cfg::Feature(stringify!($value)),
+            cfg: Some(cfg.clone()),
+            parsed: cfg,
             possible,
         }
     }};
@@ -399,12 +400,10 @@ macro_rules! cfg_aliases {
         let mut sortable = platform_fixups.into_iter().collect::<Vec<_>>();
         sortable.sort_by_key(|(_, (ord, _))| *ord);
 
-        for (cfg_key, (order, alias)) in sortable {
-            println!(
-                "[platform_fixup.'cfg({})']\ncfgs = {:?}\n",
-                cfg_key,
-                alias
-            )
+        for (cfg_key, (order, aliases)) in sortable {
+            for alias in &aliases {
+                println!("{alias} -> {cfg_key}");
+            }
         }
     };
 
