@@ -449,7 +449,7 @@ impl fmt::Display for Cfg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Set(cfg) => f.write_str(cfg),
-            Self::Feature(feat) => write!(f, "feature = {feat:?}"),
+            Self::Feature(feat) => write!(f, "feature = {feat}"),
             Self::Contains(k, v) => write!(f, "{k} = {v}"),
             Self::Not(cfg) => {
                 write!(f, "not({})", cfg)
